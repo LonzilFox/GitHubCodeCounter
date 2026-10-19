@@ -1,15 +1,19 @@
 $ErrorActionPreference = "Stop"
 
 $AppName = "GitHubCodeCounter"
-$Version = "v0.0.2"
+$Version = "v0.0.4"
 $ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $ToolRoot "GitHubCodeCounter.config.json"
 $LogDir = Join-Path $ToolRoot "logs"
 $ErrorLog = Join-Path $LogDir "latest_error.log"
 
-$ExcludedDirs = ".git,.github,node_modules,bin,obj,build,dist,.vs,.idea,venv,.venv,__pycache__,packages,target,.gradle,.cache,coverage"
+$ExcludedDirs = ".git,.github,node_modules,bin,obj,build,dist,.vs,.idea,venv,.venv,__pycache__,packages,target,.gradle,.cache,coverage,logs,.next,.nuxt,.turbo,.pytest_cache,.mypy_cache,.ruff_cache,vendor,Pods"
+$ExcludedDirNames = @($ExcludedDirs -split ",")
 $ExcludedLanguages = "Text,Markdown"
-$ExcludedExtensions = "md,markdown,mdown,mkdn,mkd"
+# These extensions are data/configuration/documentation, not source code. Markdown is excluded entirely.
+$ExcludedExtensions = "md,markdown,mdown,mkdn,mkd,mdx,mdwn,mdtxt,rmd,qmd,json,jsonc,json5,jsonl,ndjson,geojson,txt,text,xml,yaml,yml,toml,csv,tsv,ini,properties,conf,config,env,lock,log,ipynb,plist"
+$DataExtensions = @("json", "jsonc", "json5", "jsonl", "ndjson", "geojson", "txt", "text", "xml", "yaml", "yml", "toml", "csv", "tsv", "ini", "properties", "conf", "config", "env", "lock", "log", "ipynb", "plist")
+$DefaultExcludedRepositories = @("Wand-Enhancer")
 
 function Write-Rule {
     param(
@@ -51,6 +55,84 @@ function Require-Command {
     }
 
     return $command
+}
+
+function Refresh-ProcessPath {
+    $paths = @(
+        $env:Path,
+        [Environment]::GetEnvironmentVariable("Path", "Machine"),
+        [Environment]::GetEnvironmentVariable("Path", "User")
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+
+    $uniquePaths = @()
+    foreach ($entry in ($paths -join ";" -split ";")) {
+        $trimmed = $entry.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trimmed) -and ($uniquePaths -notcontains $trimmed)) {
+            $uniquePaths += $trimmed
+        }
+    }
+    $env:Path = $uniquePaths -join ";"
+
+    $possiblePaths = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $possiblePaths += (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\cloc.exe")
+        $possiblePaths += (Join-Path $env:LOCALAPPDATA "Programs\cloc\cloc.exe")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        $possiblePaths += (Join-Path $env:ProgramFiles "cloc\cloc.exe")
+    }
+
+    foreach ($candidate in $possiblePaths) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $folder = Split-Path -Parent $candidate
+            if (($env:Path -split ";") -notcontains $folder) {
+                $env:Path = $folder + ";" + $env:Path
+            }
+        }
+    }
+}
+
+function Test-ClocCommand {
+    $command = Get-Command "cloc" -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        return $false
+    }
+
+    try {
+        $null = @(& cloc --version 2>&1)
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Ensure-Cloc {
+    Refresh-ProcessPath
+
+    if (Test-ClocCommand) {
+        Write-Host "  cloc         : installed; skipping installation" -ForegroundColor Green
+        return
+    }
+
+    $winget = Get-Command "winget" -ErrorAction SilentlyContinue
+    if ($null -eq $winget) {
+        throw "cloc was not found and winget is unavailable. Install App Installer/winget, then run this tool again."
+    }
+
+    Write-Host "  cloc was not found. Installing AlDanial.Cloc with winget..." -ForegroundColor Yellow
+    & $winget.Source install --id AlDanial.Cloc -e --accept-source-agreements --accept-package-agreements
+    $installExitCode = $LASTEXITCODE
+    if ($installExitCode -ne 0) {
+        throw "Automatic cloc installation failed (winget exit code $installExitCode). Install manually with: winget install --id AlDanial.Cloc -e"
+    }
+
+    Refresh-ProcessPath
+    if (-not (Test-ClocCommand)) {
+        throw "winget reported that cloc was installed, but the cloc command is still unavailable. Reopen the terminal and run this tool again."
+    }
+
+    Write-Host "  cloc         : installation verified" -ForegroundColor Green
 }
 
 function Invoke-External {
@@ -110,17 +192,40 @@ function Get-Config {
 function Save-Config {
     param(
         [string]$Owner,
-        [string]$WorkspaceRoot
+        [string]$WorkspaceRoot,
+        $ExistingConfig
+    )
+
+    $excludedRepositories = @($DefaultExcludedRepositories)
+    $includeForks = $false
+
+    if ($null -ne $ExistingConfig) {
+        $excludedProperty = $ExistingConfig.PSObject.Properties["excludedRepositories"]
+        if ($null -ne $excludedProperty) {
+            $excludedRepositories = @($ExistingConfig.excludedRepositories)
+        }
+
+        $includeForksProperty = $ExistingConfig.PSObject.Properties["includeForks"]
+        if ($null -ne $includeForksProperty) {
+            $includeForks = [bool]$ExistingConfig.includeForks
+        }
+    }
+
+    $cleanExcludedRepositories = @(
+        $excludedRepositories |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     )
 
     $config = [ordered]@{
         owner = $Owner
         workspaceRoot = $WorkspaceRoot
+        excludedRepositories = $cleanExcludedRepositories
+        includeForks = $includeForks
     }
 
-    $config | ConvertTo-Json | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
 }
-
 function Resolve-WorkspaceRoot {
     param($Config)
 
@@ -188,12 +293,14 @@ function Resolve-GitHubOwner {
     )
 
     if ($GhSession.Authenticated -and (-not [string]::IsNullOrWhiteSpace($GhSession.Login))) {
-        Save-Config $GhSession.Login $WorkspaceRoot
+        Save-Config $GhSession.Login $WorkspaceRoot $Config
         return $GhSession.Login
     }
 
     if (($null -ne $Config) -and (-not [string]::IsNullOrWhiteSpace([string]$Config.owner))) {
-        return ([string]$Config.owner).Trim()
+        $configuredOwner = ([string]$Config.owner).Trim()
+        Save-Config $configuredOwner $WorkspaceRoot $Config
+        return $configuredOwner
     }
 
     try {
@@ -201,7 +308,7 @@ function Resolve-GitHubOwner {
         if (($LASTEXITCODE -eq 0) -and ($gitUser.Count -gt 0)) {
             $candidate = ([string]$gitUser[0]).Trim()
             if (-not [string]::IsNullOrWhiteSpace($candidate)) {
-                Save-Config $candidate $WorkspaceRoot
+                Save-Config $candidate $WorkspaceRoot $Config
                 return $candidate
             }
         }
@@ -218,7 +325,7 @@ function Resolve-GitHubOwner {
         $owner = (Read-Host "  GitHub username").Trim()
     } while ([string]::IsNullOrWhiteSpace($owner))
 
-    Save-Config $owner $WorkspaceRoot
+    Save-Config $owner $WorkspaceRoot $Config
     return $owner
 }
 
@@ -671,7 +778,6 @@ function Get-ClocArguments {
     $arguments += "--exclude-lang=$ExcludedLanguages"
     $arguments += "--exclude-ext=$ExcludedExtensions"
     $arguments += "--exclude-dir=$ExcludedDirs"
-    $arguments += "--quiet"
 
     return @($arguments)
 }
@@ -693,24 +799,149 @@ function Get-CodeTotal {
     $arguments = Get-ClocArguments $TargetPaths
     $arguments += "--json"
 
-    $output = @(& cloc @arguments 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "cloc JSON scan failed (exit code $LASTEXITCODE)"
+    # Keep stderr separate so warnings cannot corrupt the JSON document.
+    $output = @(& cloc @arguments 2>$null)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "cloc JSON scan failed (exit code $exitCode)"
     }
 
     $raw = ($output | ForEach-Object { $_.ToString() }) -join "`n"
     if ([string]::IsNullOrWhiteSpace($raw)) {
-        return 0
+        throw "cloc returned empty JSON output. Statistics were stopped instead of reporting a false zero."
     }
 
-    $data = $raw | ConvertFrom-Json
+    try {
+        $data = $raw | ConvertFrom-Json
+    }
+    catch {
+        throw "cloc returned invalid JSON output. Statistics were stopped instead of reporting a false zero."
+    }
+
     if ($null -eq $data.SUM) {
-        return 0
+        # A valid cloc JSON document without SUM can occur when a repository contains
+        # no recognized source files (for example, a README-only repository).
+        if ($null -ne $data.header) {
+            return [int64]0
+        }
+        throw "cloc JSON output has no SUM section. Statistics were stopped instead of reporting a false zero."
+    }
+
+    if ($null -eq $data.SUM.code) {
+        throw "cloc JSON SUM section has no code count. Statistics were stopped instead of reporting a false zero."
     }
 
     return [int64]$data.SUM.code
 }
 
+function Get-ProjectFiles {
+    param([string]$RootPath)
+
+    if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) {
+        return
+    }
+
+    $stack = New-Object System.Collections.Stack
+    $stack.Push((Get-Item -LiteralPath $RootPath -Force))
+
+    while ($stack.Count -gt 0) {
+        $directory = $stack.Pop()
+
+        try {
+            foreach ($file in $directory.GetFiles()) {
+                if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                Write-Output $file
+            }
+        }
+        catch {
+        }
+
+        try {
+            foreach ($childDirectory in $directory.GetDirectories()) {
+                if ($ExcludedDirNames -contains $childDirectory.Name) {
+                    continue
+                }
+                if (($childDirectory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                $stack.Push($childDirectory)
+            }
+        }
+        catch {
+        }
+    }
+}
+
+function Get-FileLineCount {
+    param([string]$Path)
+
+    $reader = $null
+    try {
+        $reader = [System.IO.StreamReader]::new($Path, $true)
+        [int64]$lineCount = 0
+        while ($null -ne $reader.ReadLine()) {
+            $lineCount++
+        }
+        return $lineCount
+    }
+    catch {
+        Write-Host ("    Warning: unable to read data file: " + $Path) -ForegroundColor DarkYellow
+        return [int64]0
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+    }
+}
+
+function Get-ProjectDataStats {
+    param([string]$TargetPath)
+
+    $extensionStats = @{}
+
+    foreach ($file in @(Get-ProjectFiles $TargetPath)) {
+        $extension = $file.Extension.TrimStart('.').ToLowerInvariant()
+        if ($file.Name -match '^\.env(?:\..+)?$') {
+            $extension = "env"
+        }
+        if ($DataExtensions -notcontains $extension) {
+            continue
+        }
+        if ($file.Name -ieq "GitHubCodeCounter.config.json") {
+            continue
+        }
+
+        $lineCount = Get-FileLineCount $file.FullName
+        if (-not $extensionStats.ContainsKey($extension)) {
+            $extensionStats[$extension] = [pscustomobject]@{
+                Extension = ("." + $extension)
+                Files = 0
+                Lines = [int64]0
+            }
+        }
+
+        $entry = $extensionStats[$extension]
+        $entry.Files = [int]$entry.Files + 1
+        $entry.Lines = [int64]$entry.Lines + $lineCount
+    }
+
+    $breakdown = @($extensionStats.Values | Sort-Object -Property Extension)
+    [int]$fileTotal = 0
+    [int64]$lineTotal = 0
+    foreach ($entry in $breakdown) {
+        $fileTotal += [int]$entry.Files
+        $lineTotal += [int64]$entry.Lines
+    }
+
+    return [pscustomobject]@{
+        Files = $fileTotal
+        Lines = $lineTotal
+        Breakdown = $breakdown
+    }
+}
 try {
     Clear-Host
 
@@ -729,19 +960,35 @@ try {
 
     Write-Rule "=" 96 Cyan
     Write-Host ("   {0} {1}" -f $AppName.ToUpperInvariant(), $Version) -ForegroundColor Cyan
-    Write-Host "   Refresh existing project folders first, clone missing GitHub repositories, then count code." -ForegroundColor DarkGray
+    Write-Host "   Refresh GitHub repositories, count source code, and report data/config files separately." -ForegroundColor DarkGray
     Write-Rule "=" 96 Cyan
     Write-Host ""
     Write-Host ("  Tool root     : " + $ToolRoot) -ForegroundColor Gray
     Write-Host ("  Workspace root: " + $workspaceRoot) -ForegroundColor Gray
     Write-Host "  Markdown      : excluded completely" -ForegroundColor Gray
+    Write-Host "  Data/config    : separate statistics; excluded from source-code totals" -ForegroundColor Gray
     Write-Host ""
 
     Require-Command "git" "winget install --id Git.Git -e" | Out-Null
-    Require-Command "cloc" "winget install --id AlDanial.Cloc -e" | Out-Null
+    Ensure-Cloc
 
     $ghSession = Get-GhSession
     $owner = Resolve-GitHubOwner $ghSession $config $workspaceRoot
+    $config = Get-Config
+
+    $excludedRepositoryNames = @($DefaultExcludedRepositories)
+    if (($null -ne $config) -and ($null -ne $config.PSObject.Properties["excludedRepositories"])) {
+        $excludedRepositoryNames = @(
+            $config.excludedRepositories |
+                ForEach-Object { ([string]$_).Trim() } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+    }
+
+    $includeForks = $false
+    if (($null -ne $config) -and ($null -ne $config.PSObject.Properties["includeForks"])) {
+        $includeForks = [bool]$config.includeForks
+    }
 
     Write-Title "STEP 1 - DISCOVER GITHUB REPOSITORIES" ("Account: " + $owner)
 
@@ -795,7 +1042,7 @@ try {
         Write-Host ""
         Write-Host "  Failed repositories are excluded from statistics:" -ForegroundColor DarkYellow
         foreach ($item in $failed) {
-            Write-Host ("    - " + $item.Repo.FullName) -ForegroundColor Red
+            Write-Host ("    - {0}: {1}" -f $item.Repo.FullName, $item.Message) -ForegroundColor Red
         }
     }
 
@@ -803,27 +1050,68 @@ try {
         throw "No non-empty GitHub repositories are available for statistics."
     }
 
-    $targetPaths = @($countable | ForEach-Object { $_.Path })
+    $statsCandidates = @()
+    $excludedFromStats = @()
+    foreach ($item in $countable) {
+        $reasons = @()
+        $repoName = [string]$item.Repo.Name
+        $repoFullName = [string]$item.Repo.FullName
 
-    Write-Title "STEP 3 - ALL REPOSITORIES - TOTAL" "Markdown/Text/dependencies/build output excluded"
+        if (($excludedRepositoryNames -contains $repoName) -or ($excludedRepositoryNames -contains $repoFullName)) {
+            $reasons += "configured exclusion"
+        }
+        if (([bool]$item.Repo.IsFork) -and (-not $includeForks)) {
+            $reasons += "GitHub fork (forks excluded by default)"
+        }
+
+        if ($reasons.Count -gt 0) {
+            $excludedFromStats += [pscustomobject]@{
+                Repo = $item.Repo
+                Reason = ($reasons -join "; ")
+            }
+        }
+        else {
+            $statsCandidates += $item
+        }
+    }
+
+    if ($excludedFromStats.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  Repositories excluded from all statistics:" -ForegroundColor DarkYellow
+        foreach ($item in $excludedFromStats) {
+            Write-Host ("    - {0}: {1}" -f $item.Repo.FullName, $item.Reason) -ForegroundColor DarkYellow
+        }
+    }
+
+    if ($statsCandidates.Count -eq 0) {
+        throw "All synchronized repositories were excluded from statistics. Check excludedRepositories/includeForks in GitHubCodeCounter.config.json."
+    }
+
+    $targetPaths = @($statsCandidates | ForEach-Object { $_.Path })
+
+    Write-Title "STEP 3 - ALL INCLUDED REPOSITORIES - SOURCE CODE TOTAL" "Markdown and data/config extensions excluded; cloc output is validated"
     Show-ClocTable -TargetPaths $targetPaths
 
-    Write-Title "STEP 4 - PROJECT RANKING" "Sorted by source code lines"
+    Write-Title "STEP 4 - PROJECT RANKING" "Sorted by source-code lines; forks and configured exclusions are omitted"
 
     $projectStats = @()
-    $count = $countable.Count
+    $count = $statsCandidates.Count
     $current = 0
 
-    foreach ($item in $countable) {
+    foreach ($item in $statsCandidates) {
         $current++
         $folder = Get-Item -LiteralPath $item.Path
         Write-Host ("  Scanning [{0}/{1}] {2}" -f $current, $count, $folder.Name) -ForegroundColor DarkCyan
 
         $codeCount = Get-CodeTotal -TargetPaths @($folder.FullName)
+        $dataStats = Get-ProjectDataStats -TargetPath $folder.FullName
         $projectStats += [pscustomobject]@{
             Name = $folder.Name
             Path = $folder.FullName
-            Code = $codeCount
+            Code = [int64]$codeCount
+            DataFiles = [int]$dataStats.Files
+            DataLines = [int64]$dataStats.Lines
+            DataBreakdown = @($dataStats.Breakdown)
         }
     }
 
@@ -864,21 +1152,68 @@ try {
         ) -ForegroundColor $rankColor
     }
 
-    Write-Title "STEP 5 - EACH PROJECT" "Full cloc table for every GitHub repository"
+    Write-Title "STEP 5 - DATA / CONFIG FILES" "Not included in source-code totals; Markdown is excluded completely"
+    $extensionAggregate = @{}
+    foreach ($project in $projectStats) {
+        foreach ($dataEntry in $project.DataBreakdown) {
+            $extensionKey = [string]$dataEntry.Extension
+            if (-not $extensionAggregate.ContainsKey($extensionKey)) {
+                $extensionAggregate[$extensionKey] = [pscustomobject]@{
+                    Extension = $extensionKey
+                    Files = 0
+                    Lines = [int64]0
+                }
+            }
+            $aggregateEntry = $extensionAggregate[$extensionKey]
+            $aggregateEntry.Files = [int]$aggregateEntry.Files + [int]$dataEntry.Files
+            $aggregateEntry.Lines = [int64]$aggregateEntry.Lines + [int64]$dataEntry.Lines
+        }
+    }
+
+    Write-Host "  Overall data/config breakdown by extension:" -ForegroundColor Gray
+    if ($extensionAggregate.Count -gt 0) {
+        $extensionAggregate.Values |
+            Sort-Object -Property Extension |
+            Format-Table -Property `
+                @{ Label = "Extension"; Expression = { $_.Extension } }, `
+                @{ Label = "Files"; Expression = { $_.Files }; Alignment = "Right" }, `
+                @{ Label = "Lines"; Expression = { $_.Lines }; Alignment = "Right" } -AutoSize
+    }
+    else {
+        Write-Host "  No data/config files found in the included repositories." -ForegroundColor DarkGray
+    }
+
+    Write-Host "  Data/config totals by project:" -ForegroundColor Gray
+    $projectStats |
+        Sort-Object -Property DataLines -Descending |
+        Select-Object Name, DataFiles, DataLines |
+        Format-Table -AutoSize
+
+    Write-Title "STEP 6 - EACH PROJECT" "Source-code language table for every included GitHub repository"
 
     foreach ($project in $projectStats) {
-        Write-Title ("PROJECT - " + $project.Name) ("Code lines: {0:N0}" -f $project.Code)
+        Write-Title ("PROJECT - " + $project.Name) ("Code lines: {0:N0} | Data/config files: {1:N0} | Data/config lines: {2:N0}" -f $project.Code, $project.DataFiles, $project.DataLines)
         Show-ClocTable -TargetPaths @($project.Path)
     }
 
-    $grandTotal = Get-CodeTotal -TargetPaths $targetPaths
+    [int64]$grandTotal = 0
+    [int64]$grandDataLines = 0
+    [int64]$grandDataFiles = 0
+    foreach ($project in $projectStats) {
+        $grandTotal += [int64]$project.Code
+        $grandDataLines += [int64]$project.DataLines
+        $grandDataFiles += [int64]$project.DataFiles
+    }
 
     Write-Title "DONE" "Refresh and statistics completed"
     Write-Host ("  GitHub account : {0}" -f $owner) -ForegroundColor Gray
     Write-Host ("  Remote repos   : {0}" -f $repositories.Count) -ForegroundColor Gray
     Write-Host ("  Counted repos  : {0}" -f $projectStats.Count) -ForegroundColor Gray
+    Write-Host ("  Excluded repos : {0}" -f $excludedFromStats.Count) -ForegroundColor Gray
     Write-Host ("  Fully refreshed: {0}" -f $fullyUpdated.Count) -ForegroundColor Gray
-    Write-Host ("  Code lines     : {0:N0}" -f $grandTotal) -ForegroundColor Green
+    Write-Host ("  Source lines   : {0:N0}" -f $grandTotal) -ForegroundColor Green
+    Write-Host ("  Data files     : {0:N0}" -f $grandDataFiles) -ForegroundColor Gray
+    Write-Host ("  Data lines     : {0:N0}" -f $grandDataLines) -ForegroundColor Gray
     Write-Host ""
 
     if (($failed.Count -gt 0) -or ($preserved.Count -gt 0)) {

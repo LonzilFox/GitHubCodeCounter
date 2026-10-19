@@ -1,14 +1,14 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title GitHubCodeCounter v0.0.2
+title GitHubCodeCounter v0.0.4
 
 chcp 65001 >nul 2>&1
 
 echo.
 echo ================================================================================
-echo  Starting GitHubCodeCounter v0.0.2
-echo  Existing project folders will be refreshed before code statistics are calculated.
+echo  Starting GitHubCodeCounter v0.0.4
+echo  cloc is checked automatically and installed with winget when missing.
 echo ================================================================================
 echo.
 

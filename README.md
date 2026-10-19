@@ -1,55 +1,39 @@
 # GitHubCodeCounter
 
-Windows tool for refreshing GitHub repositories and calculating code statistics.
+A Windows command-line tool that refreshes your GitHub repositories and reports source-code statistics separately from data/configuration files.
 
 ## Usage
 
-Place `GitHubCodeCounter` alongside your local project folders:
+Place this folder alongside your local project folders and run `GitHubCodeCounter.bat`.
 
-```text
-Projects/
-├─ GitHubCodeCounter/
-├─ OCRCaptureTool/
-├─ ScreenAssistant/
-├─ SlimeLounge/
-└─ ...
-```
+The tool refreshes existing Git repositories safely, clones missing repositories, and then reports:
 
-Run `GitHubCodeCounter.bat`.
+- Source-code lines by language and project.
+- JSON, TXT, XML, YAML, CSV, TOML, INI, and other data/configuration files in a separate table.
+- File counts and line counts for each data/configuration extension.
 
-The tool will:
-
-1. Read the current repository list from GitHub.
-2. Refresh existing local Git repositories with `git fetch --prune`.
-3. Fast-forward clean working trees when the remote branch has newer commits.
-4. Preserve repositories that contain local uncommitted changes instead of using `reset --hard` or `clean`.
-5. Clone GitHub repositories that do not yet exist locally.
-6. Run `cloc` only after repository refresh is complete.
-
-Markdown files are excluded from statistics.
+Markdown files are excluded completely. Data/configuration files are excluded from the source-code totals. GitHub forks are excluded from statistics by default. `Wand-Enhancer` is also excluded by default.
 
 ## Requirements
 
-- Git
-- cloc
-- GitHub CLI (`gh`) is recommended for authenticated/private repository discovery.
+- Git for Windows
+- Windows Package Manager (`winget`) if `cloc` is not already available
+- GitHub CLI is optional; it is recommended if private repositories should be included
+
+The launcher checks for `cloc` before running. If it is missing, the tool installs it with:
 
 ```powershell
-winget install --id Git.Git -e
 winget install --id AlDanial.Cloc -e
-winget install --id GitHub.cli -e
-gh auth login
 ```
 
-Without an authenticated GitHub CLI session, public repositories are discovered through the GitHub Public API.
+Without an authenticated GitHub CLI session, the tool can discover public repositories through the GitHub API only.
 
-## Local files
+## Local settings
 
-The tool can create these files/directories while running:
+The tool creates `GitHubCodeCounter.config.json` on first run. It is ignored by Git and can be edited locally:
 
-```text
-GitHubCodeCounter.config.json
-logs/
-```
+- `excludedRepositories`: repository names or `OWNER/REPO` names excluded from all statistics. The default is `Wand-Enhancer`.
+- `includeForks`: set to `true` to include GitHub-marked forks in statistics; the default is `false`.
+- `workspaceRoot`: the parent directory containing your project folders.
 
-They are excluded by `.gitignore` and should not be committed.
+Local logs and configuration are excluded from Git commits.
